@@ -1,74 +1,75 @@
-import httpx
 from dotenv import load_dotenv
-import os
-
-
-def get_env(key: str) -> str:
-    env_variable = os.getenv(key)
-    if env_variable is None:
-        raise Exception(f"Variable '{key}' not set in .env file")
-
-    return env_variable
-
+from os.path import isdir, isfile, join
+from os import listdir
+from api.api_swotzy import ApiSwotzy
+from data_loader import CountryDataLoader
+from schemas.rates import Address, Package, CustomsItem, ShippingRatesReq, Shipments
+from utils import get_env, load_json_file
 
 load_dotenv()
-PUBLIC_KEY = get_env("PUBLIC_KEY")
-PRIVATE_KEY = get_env("PRIVATE_KEY")
 
-auth = httpx.BasicAuth(username=PUBLIC_KEY, password=PRIVATE_KEY)
-client = httpx.Client(auth=auth)
 
-base_url = "https://api.swotzy.com/public"
-rates_path = "/rates"
+def get_dir_filepaths(*, dir_path: str) -> list[str]:
+    if not isdir(dir_path):
+        raise ValueError(f"{dir_path=} is not a directory")
+
+    return [f"{dir_path}/{f}" for f in listdir(dir_path) if isfile(join(dir_path, f))]
 
 
 def main():
-    data = {
-        "sender_address": {
-            "address1": get_env("SENDER_ADDRESS"),
-            "address2": "",
-            "zip": get_env("SENDER_ZIP"),
-            "city": get_env("SENDER_CITY"),
-            "country": get_env("SENDER_COUNTRY"),
-            "state": get_env("SENDER_STATE"),
-            "name": get_env("SENDER_NAME"),
-        },
-        "shipments": [
-            {
-                "package": {"length": 16, "width": 16, "height": 7, "weight": 0.2},
-                "customs_items": [
-                    {
-                        "title": "Example product",
-                        "quantity": "1",
-                        "value": "19.99",
-                        "country_of_origin": get_env("SENDER_COUNTRY"),
-                        "weight": "0.2",
-                        "hs_code": "392690",
-                    }
-                ],
-            }
-        ],
-        "recipient_address": {
-            "address1": get_env("RECEIVER_ADDRESS"),
-            "address2": "",
-            "zip": get_env("RECEIVER_ZIP"),
-            "city": get_env("RECEIVER_CITY"),
-            "country": get_env("RECEIVER_COUNTRY"),
-            "state": get_env("RECEIVER_STATE"),
-            "name": get_env("RECEIVER_NAME"),
-        },
-    }
+    api_client = ApiSwotzy()
 
-    url = base_url + rates_path
-    headers = {"Accept": "application/json"}
+    filepath = "data/country/austria.csv"
+    country_data = CountryDataLoader.load_csv(filepath=filepath)
+    alpha_2 = country_data.alpha_2
 
-    res = client.post(url, json=data, headers=headers)
+    package_dict = load_json_file(filepath="data/package.json")
+    package = Package(**package_dict, weight=0.2)
 
-    print(f"Status: {res.status_code}")
-    if res.status_code == 200:
-        print(res.json())
-    else:
-        print(res.content)
+    customs_items_dict = load_json_file(filepath="data/customs_item.json")
+    customs_items = CustomsItem(
+        **customs_items_dict,
+        weight=0.2,
+        country_of_origin=get_env("SENDER_COUNTRY"),
+    )
+
+    sender_address = Address(
+        address1=get_env("SENDER_ADDRESS"),
+        zip=get_env("SENDER_ZIP"),
+        city=get_env("SENDER_CITY"),
+        country=get_env("SENDER_COUNTRY"),
+        state=get_env("SENDER_STATE"),
+        name=get_env("SENDER_NAME"),
+    )
+    customs_items = CustomsItem(
+        title="Example product",
+        quantity=1,
+        value=19.99,
+        country_of_origin=get_env("SENDER_COUNTRY"),
+        weight=0.2,
+        hs_code="392690",
+    )
+
+    for country_data_row in country_data.data:
+        recipient_address = Address(
+            address1=country_data_row.street,
+            zip=country_data_row.zip_code,
+            city=country_data_row.city,
+            country=alpha_2,
+            state=country_data_row.state,
+            name="Test Name",
+        )
+        request = ShippingRatesReq(
+            sender_address=sender_address,
+            shipments=[Shipments(package=package, customs_items=[customs_items])],
+            recipient_address=recipient_address,
+        )
+
+        res = api_client.get_rates(request=request)
+        print(res.rates[0])
+        print("===")
+
+    print("end")
 
 
 if __name__ == "__main__":

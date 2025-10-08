@@ -1,7 +1,7 @@
 import os
 import pycountry
-import json
-from typing import Any
+from os.path import isdir, isfile, join
+from os import listdir
 
 
 def get_env(key: str) -> str:
@@ -24,6 +24,8 @@ def extract_filename(*, filepath: str) -> str:
     return filepath.split("/")[-1].split(".")[0]
 
 
-def load_json_file(*, filepath: str) -> dict[str, Any]:
-    with open(filepath, "r") as f:
-        return json.load(f)
+def get_dir_filepaths(*, dir_path: str) -> list[str]:
+    if not isdir(dir_path):
+        raise ValueError(f"{dir_path=} is not a directory")
+
+    return [f"{dir_path}/{f}" for f in listdir(dir_path) if isfile(join(dir_path, f))]

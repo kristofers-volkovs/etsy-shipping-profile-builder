@@ -2,9 +2,10 @@ from api.api_base import ApiBase
 import httpx
 from schemas.rates import ShippingRatesReq, ShippingRatesRes
 from utils import get_env
+from abc import ABC, abstractmethod
 
 
-class ApiSwotzy(ApiBase):
+class ApiSwotzyBase(ApiBase, ABC):
     def _create_http_client(self) -> httpx.Client:
         PUBLIC_KEY = get_env("PUBLIC_KEY")
         PRIVATE_KEY = get_env("PRIVATE_KEY")
@@ -15,10 +16,16 @@ class ApiSwotzy(ApiBase):
     def _get_base_url(self) -> str:
         return "https://api.swotzy.com/public"
 
-    def get_rates(self, *, request: ShippingRatesReq) -> ShippingRatesRes:
+    @abstractmethod
+    def get_rates(self, *, req: ShippingRatesReq) -> ShippingRatesRes:
+        pass
+
+
+class ApiSwotzy(ApiSwotzyBase):
+    def get_rates(self, *, req: ShippingRatesReq) -> ShippingRatesRes:
         url = self._base_url + "/rates"
         headers = {"Accept": "application/json"}
-        data = request.model_dump(mode="json")
+        data = req.model_dump(mode="json")
 
         res = self._client.post(url, json=data, headers=headers)
         if res.status_code == 200:

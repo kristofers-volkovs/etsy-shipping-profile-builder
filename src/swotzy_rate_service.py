@@ -11,11 +11,13 @@ from schemas.rates import (
 )
 from schemas.country import CountryData
 from utils import get_env
+from dataframes.rates_df import RatesDataFrame
+from tqdm import tqdm
 
 
 class SwotzyRateService:
     def __init__(self, *, api_client: ApiSwotzyBase) -> None:
-        self._api_client = api_client
+        self.__api_client = api_client
 
     def _get_country_rates(
         self,
@@ -41,12 +43,14 @@ class SwotzyRateService:
                 shipments=[Shipments(package=package, customs_items=[customs_item])],
                 recipient_address=recipient_address,
             )
-            res = self._api_client.get_rates(req=req)
+            res = self.__api_client.get_rates(req=req)
 
-            if not res.errors:
+            if len(res.rates) > 0:
                 country_rates.extend(res.rates)
             else:
-                raise Exception(f"Swotzy API call failed, error: {res.errors}")
+                raise Exception(
+                    f"Swotzy API call failed, error: {res.errors}, request: {req}"
+                )
 
         return country_rates
 
@@ -58,7 +62,9 @@ class SwotzyRateService:
         customs_item_filepath: str,
     ) -> None:
         country_filepaths = get_dir_filepaths(dir_path=country_dir_path)
-        for country_filepath in country_filepaths:
+        for country_filepath in tqdm(
+            country_filepaths, desc="Computing destination country rates"
+        ):
             self.compute_destination_country_rates(
                 country_filepath=country_filepath,
                 package_filepath=package_filepath,
@@ -100,4 +106,8 @@ class SwotzyRateService:
             country_data=country_data,
             sender_address=sender_address,
         )
-        print(len(country_rates))
+
+        rates_df = RatesDataFrame(
+            country_name=country_data.country, country_rates=country_rates
+        )
+        rates_df.save_country_rates()

@@ -1,113 +1,115 @@
-from api.api_swotzy import ApiSwotzyBase
-from utils import get_dir_filepaths
-from data_loaders import load_country_csv, load_json_file
+from api.protocols import ShippingRatesClient
+from utils.dir_iterator import DirIterator
+from schemas.country import CountryData
 from schemas.rates import (
+    Rate,
+    ShippingRatesReq,
     Address,
     Package,
     CustomsItem,
-    ShippingRatesReq,
     Shipments,
-    Rates,
 )
-from schemas.country import CountryData
-from utils import get_env
-from dataframes.rates_df import RatesDataFrame
+from utils.builder import build_recipient
+from data_loaders.protocols import DataLoader
+from pathlib import Path
+from rates_df import (
+    rates_to_dataframe,
+    average_rates,
+    filter_rates,
+    select_rates,
+    remove_untracked_option,
+)
+import pandas as pd
+from utils.file_writer import FileWriter
+from schemas.rates_config import RatesConfig
+from utils.filename_composer import FilenameComposer
+from clock import Clock
 from tqdm import tqdm
 
 
-class SwotzyRateService:
-    def __init__(self, *, api_client: ApiSwotzyBase) -> None:
-        self.__api_client = api_client
+def compose_filename(*, name: str, suffix: str, extension: str) -> str:
+    return name + suffix + extension
 
-    def _get_country_rates(
+
+class SwotzyRateService:
+    def __init__(
+        self,
+        client: ShippingRatesClient,
+        config: RatesConfig,
+        country_data_loader: DataLoader[CountryData],
+        file_writer: FileWriter[pd.DataFrame],
+        filename_composer: FilenameComposer,
+        clock: Clock,
+    ) -> None:
+        self.__client = client
+        self.__config = config
+        self.__country_data_loader = country_data_loader
+        self.__file_writer = file_writer
+        self.__filename_composer = filename_composer
+        self.__clock = clock
+
+    def compute_all_rates(
         self,
         *,
+        dir_iterator: DirIterator,
+        sender: Address,
         package: Package,
         customs_item: CustomsItem,
-        country_data: CountryData,
-        sender_address: Address,
-    ) -> list[Rates]:
-        country_rates: list[Rates] = []
-
-        for country_data_row in country_data.data:
-            recipient_address = Address(
-                address1=country_data_row.street,
-                zip=country_data_row.zip_code,
-                city=country_data_row.city,
-                country=country_data.alpha_2,
-                state=country_data_row.state,
-                name="Batman",
+    ) -> None:
+        for path in tqdm(dir_iterator.iter_dir(), desc="Computing country rates"):
+            self.compute_one_rate(
+                country_filepath=path,
+                sender=sender,
+                package=package,
+                customs_item=customs_item,
             )
-            req = ShippingRatesReq(
-                sender_address=sender_address,
-                shipments=[Shipments(package=package, customs_items=[customs_item])],
-                recipient_address=recipient_address,
-            )
-            res = self.__api_client.get_rates(req=req)
 
-            if len(res.rates) > 0:
-                country_rates.extend(res.rates)
-            else:
-                raise Exception(
-                    f"Swotzy API call failed, error: {res.errors}, request: {req}"
-                )
-
-        return country_rates
-
-    def compute_all_destination_country_rates(
+    def compute_one_rate(
         self,
         *,
-        country_dir_path: str,
-        package_filepath: str,
-        customs_item_filepath: str,
+        country_filepath: Path,
+        sender: Address,
+        package: Package,
+        customs_item: CustomsItem,
     ) -> None:
-        country_filepaths = get_dir_filepaths(dir_path=country_dir_path)
-        for country_filepath in tqdm(
-            country_filepaths, desc="Computing destination country rates"
+        country_data = self.__country_data_loader.load(path=country_filepath)
+
+        rates_filename = self.__filename_composer.compose_filename(
+            name=country_filepath.stem, extension=self.__file_writer.file_extension()
+        )
+        if self.__config.override_file and self.__file_writer.file_exists(
+            filename=rates_filename
         ):
-            self.compute_destination_country_rates(
-                country_filepath=country_filepath,
-                package_filepath=package_filepath,
-                customs_item_filepath=customs_item_filepath,
+            print(f"File {rates_filename} already exists, skipping...")
+            return
+
+        country_rates: list[Rate] = []
+        for row in country_data.sample_rows(limit=self.__config.rates_sample_limit):
+            recipient = build_recipient(country_row=row, alpha_2=country_data.alpha_2)
+
+            req = ShippingRatesReq(
+                sender_address=sender,
+                shipments=[Shipments(package=package, customs_items=[customs_item])],
+                recipient_address=recipient,
             )
+            res = self.__client.get_rates(req=req)
 
-    def compute_destination_country_rates(
-        self,
-        *,
-        country_filepath: str,
-        package_filepath: str,
-        customs_item_filepath: str,
-    ) -> None:
-        package_dict = load_json_file(filepath=package_filepath)
-        customs_item_dict = load_json_file(filepath=customs_item_filepath)
+            if len(res.rates) == 0:
+                raise RuntimeError(
+                    f"Empty rates for {country_data.country}, error: {res.errors}"
+                )
+            country_rates.extend(res.rates)
 
-        weight = 0.2
-        package = Package(**package_dict, weight=weight)
-        customs_item = CustomsItem(
-            **customs_item_dict,
-            weight=weight,
-            country_of_origin=get_env("SENDER_COUNTRY"),
+        df = rates_to_dataframe(
+            country_name=country_data.country,
+            country_rates=country_rates,
+            remove_predicate=remove_untracked_option,
+            clock=self.__clock,
         )
-
-        sender_address = Address(
-            address1=get_env("SENDER_ADDRESS"),
-            zip=get_env("SENDER_ZIP"),
-            city=get_env("SENDER_CITY"),
-            country=get_env("SENDER_COUNTRY"),
-            state=get_env("SENDER_STATE"),
-            name=get_env("SENDER_NAME"),
+        df_avg = average_rates(df=df)
+        df_filtered = filter_rates(
+            df=df_avg, max_delivery_price=self.__config.max_delivery_price
         )
+        df_rates = select_rates(df_avg=df_avg, df_filtered=df_filtered)
 
-        country_data = load_country_csv(filepath=country_filepath)
-
-        country_rates = self._get_country_rates(
-            package=package,
-            customs_item=customs_item,
-            country_data=country_data,
-            sender_address=sender_address,
-        )
-
-        rates_df = RatesDataFrame(
-            country_name=country_data.country, country_rates=country_rates
-        )
-        rates_df.save_country_rates()
+        self.__file_writer.write(filename=rates_filename, data=df_rates)

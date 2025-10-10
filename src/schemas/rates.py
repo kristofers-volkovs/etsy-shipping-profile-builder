@@ -50,7 +50,7 @@ class DeliveryEstimate(BaseModel):
     to_date: dt.datetime
 
 
-class Rates(BaseModel):
+class Rate(BaseModel):
     carrier: str
     service: str
     price: float
@@ -68,5 +68,5 @@ class Rates(BaseModel):
 
 
 class ShippingRatesRes(BaseModel):
-    rates: list[Rates]
+    rates: list[Rate]
     errors: dict[str, Any]
